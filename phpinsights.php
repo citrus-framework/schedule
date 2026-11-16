@@ -20,6 +20,7 @@ return [
         SlevomatCodingStandard\Sniffs\Functions\StaticClosureSniff::class,
         SlevomatCodingStandard\Sniffs\PHP\UselessParenthesesSniff::class,
         SlevomatCodingStandard\Sniffs\TypeHints\DisallowArrayTypeHintSyntaxSniff::class,
+        SlevomatCodingStandard\Sniffs\TypeHints\DisallowMixedTypeHintSniff::class,
         SlevomatCodingStandard\Sniffs\TypeHints\ParameterTypeHintSniff::class,
         SlevomatCodingStandard\Sniffs\TypeHints\PropertyTypeHintSniff::class,
         SlevomatCodingStandard\Sniffs\TypeHints\ReturnTypeHintSniff::class,

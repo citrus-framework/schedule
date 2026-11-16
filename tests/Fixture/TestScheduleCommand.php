@@ -11,7 +11,9 @@ declare(strict_types=1);
 namespace Test\Fixture;
 
 use Citrus\Schedule\ScheduleCommand;
+use Citrus\Schedule\ScheduleResult;
 use DateTimeImmutable;
+use Throwable;
 
 /**
  * テスト用のスケジュールのコマンド(今の時刻、起動を差し替える)
@@ -38,6 +40,12 @@ class TestScheduleCommand extends ScheduleCommand
 
     /** @var int 待つ起動の終了コード */
     public int $exitCode = 0;
+
+    /** @var ScheduleResult[] onResult() で受け取った結果 */
+    public array $results = [];
+
+    /** @var Throwable|null onResult() で投げる例外 */
+    public ?Throwable $resultThrows = null;
 
     /**
      * 設定と引数を渡して実行する
@@ -91,6 +99,18 @@ class TestScheduleCommand extends ScheduleCommand
             $onLine($line);
         }
         return $this->exitCode;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    protected function onResult(ScheduleResult $result): void
+    {
+        $this->results[] = $result;
+        if ($this->resultThrows !== null)
+        {
+            throw $this->resultThrows;
+        }
     }
 
     /**
