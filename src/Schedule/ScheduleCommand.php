@@ -70,6 +70,7 @@ abstract class ScheduleCommand extends Console
      * 案件のスケジュールのコマンドが上書きして使う。ログに書いたあと(指定したコマンドの結果は、鍵を放したあと)に呼ばれる。
      * ここで起きた例外は捕まえてログに書き、ほかの処理は続ける。
      * @param ScheduleResult $result 起動の結果
+     * @phpcsSuppress SlevomatCodingStandard.Functions.UnusedParameter
      */
     protected function onResult(ScheduleResult $result): void
     {
