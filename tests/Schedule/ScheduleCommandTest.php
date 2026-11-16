@@ -14,6 +14,7 @@ use Citrus\Logger;
 use Citrus\Logger\File;
 use Citrus\Logger\Level;
 use Citrus\Schedule;
+use Citrus\Schedule\ScheduleEvent;
 use Citrus\Schedule\ScheduleException;
 use Citrus\Schedule\ScheduleSetting;
 use DateTimeImmutable;
@@ -134,6 +135,7 @@ class ScheduleCommandTest extends TestCase
             'src/command.php',
             '--command=TestSchedule',
             '--run=' . $schedule->key(),
+            '--at=2026-03-04T10:30',
             '--domain=example.com',
             '--other=a b',
         ]));
@@ -173,6 +175,7 @@ class ScheduleCommandTest extends TestCase
         $parsedCommand = json_decode((string)shell_exec($run->processed[0]), true);
         $this->assertSame('TestSchedule', $parsedRun['command']);
         $this->assertSame($schedule->key(), $parsedRun['run']);
+        $this->assertSame('2026-03-04T10:30', $parsedRun['at']);
         $this->assertSame('example.com', $parsedRun['domain']);
         $this->assertSame('a b', $parsedRun['other']);
         $this->assertSame('Sample', $parsedCommand['command']);
@@ -181,6 +184,7 @@ class ScheduleCommandTest extends TestCase
         $this->assertSame('example.com', $parsedCommand['domain']);
         $this->assertSame('a b', $parsedCommand['other']);
         $this->assertArrayNotHasKey('run', $parsedCommand);
+        $this->assertArrayNotHasKey('at', $parsedCommand);
     }
 
     #[Test]
@@ -398,6 +402,7 @@ class ScheduleCommandTest extends TestCase
             'src/command.php',
             '--command=TestSchedule',
             '--run=' . $schedule->key(),
+            '--at=2026-03-04T10:30',
             '--domain',
             'example.com',
             '--other=1',
@@ -789,5 +794,314 @@ class ScheduleCommandTest extends TestCase
         $elapsed = microtime(true) - $started;
 
         $this->assertLessThan(1.0, $elapsed);
+    }
+
+    #[Test]
+    public function 終了コードが0で終わったときの結果()
+    {
+        $schedule = Schedule::command(SampleCommand::class, ['account' => 'a']);
+        TestScheduleCommand::$schedulesCallback = fn (): array => [$schedule];
+        $command = $this->command();
+        $command->lines = ['first', 'succeeded: done'];
+
+        $command->go($this->configures(), ['run' => $schedule->key(), 'at' => '2026-03-04T10:30']);
+
+        $this->assertCount(1, $command->results);
+        $result = $command->results[0];
+        $this->assertSame(ScheduleEvent::FINISHED, $result->event);
+        $this->assertSame(SampleCommand::class, $result->commandClass);
+        $this->assertSame(['account' => 'a'], $result->arguments);
+        $this->assertSame(0, $result->exitCode);
+        $this->assertIsFloat($result->seconds);
+        $this->assertSame(['first', 'succeeded: done'], $result->lines);
+        $this->assertNull($result->error);
+        $this->assertSame('2026-03-04 10:30:00', $result->at->format('Y-m-d H:i:s'));
+    }
+
+    #[Test]
+    public function 終了コードが0でなく終わったときの結果()
+    {
+        $schedule = Schedule::command(SampleCommand::class);
+        TestScheduleCommand::$schedulesCallback = fn (): array => [$schedule];
+        $command = $this->command();
+        $command->exitCode = 3;
+
+        $command->go($this->configures(), ['run' => $schedule->key()]);
+
+        $this->assertCount(1, $command->results);
+        $this->assertSame(ScheduleEvent::FINISHED, $command->results[0]->event);
+        $this->assertSame(3, $command->results[0]->exitCode);
+        $this->assertSame([], $command->results[0]->arguments);
+        $this->assertNull($command->results[0]->at);
+    }
+
+    #[Test]
+    public function 出した文は終わりの20行だけを結果に入れる()
+    {
+        $schedule = Schedule::command(SampleCommand::class);
+        TestScheduleCommand::$schedulesCallback = fn (): array => [$schedule];
+        $command = $this->command();
+        $command->lines = array_map(fn (int $i): string => 'line' . $i, range(1, 25));
+
+        $command->go($this->configures(), ['run' => $schedule->key()]);
+
+        $this->assertSame(array_map(fn (int $i): string => 'line' . $i, range(6, 25)), $command->results[0]->lines);
+        $this->assertStringContainsString('[Sample] line1', $this->logs());
+    }
+
+    #[Test]
+    public function 起動できなかったときの結果()
+    {
+        $schedule = Schedule::command(SampleCommand::class, ['account' => 'a']);
+        TestScheduleCommand::$schedulesCallback = fn (): array => [$schedule];
+        $command = $this->command();
+        $command->startFails = true;
+
+        $command->go($this->configures(), ['run' => $schedule->key()]);
+
+        $this->assertCount(1, $command->results);
+        $result = $command->results[0];
+        $this->assertSame(ScheduleEvent::START_FAILED, $result->event);
+        $this->assertSame(SampleCommand::class, $result->commandClass);
+        $this->assertSame(['account' => 'a'], $result->arguments);
+        $this->assertNull($result->exitCode);
+        $this->assertNull($result->seconds);
+        $this->assertSame([], $result->lines);
+        $this->assertStringContainsString('起動できなかった', $result->error);
+        $this->assertLockReleased($schedule);
+    }
+
+    #[Test]
+    public function schedulesの例外の結果はcronから起動した形と指定を1つ実行する形の両方で渡る()
+    {
+        TestScheduleCommand::$schedulesCallback = function (): array {
+            throw new ScheduleException('例外の結果');
+        };
+        $cron = $this->command();
+        $run = $this->command();
+
+        $cron->go($this->configures(), []);
+        $run->go($this->configures(), ['run' => 'abc', 'at' => '2026-03-04T10:30']);
+
+        $this->assertCount(1, $cron->results);
+        $this->assertSame(ScheduleEvent::EXCEPTION, $cron->results[0]->event);
+        $this->assertSame('例外の結果', $cron->results[0]->error);
+        $this->assertNull($cron->results[0]->commandClass);
+        $this->assertSame([], $cron->results[0]->arguments);
+        $this->assertSame('2026-03-04 10:30:00', $cron->results[0]->at->format('Y-m-d H:i:s'));
+        $this->assertCount(1, $run->results);
+        $this->assertSame(ScheduleEvent::EXCEPTION, $run->results[0]->event);
+        $this->assertSame('例外の結果', $run->results[0]->error);
+        $this->assertSame('2026-03-04 10:30:00', $run->results[0]->at->format('Y-m-d H:i:s'));
+    }
+
+    #[Test]
+    public function 指定を1つ実行する形で設定の読み込みの例外の結果にもatが入る()
+    {
+        $command = $this->command();
+
+        $command->go(['schedule' => 'invalid'], ['run' => 'abc', 'at' => '2026-03-04T10:30']);
+
+        $this->assertCount(1, $command->results);
+        $this->assertSame(ScheduleEvent::EXCEPTION, $command->results[0]->event);
+        $this->assertSame('2026-03-04 10:30:00', $command->results[0]->at->format('Y-m-d H:i:s'));
+    }
+
+    #[Test]
+    public function 指定を1つ実行する形で捕まえた例外の結果に指定したコマンドが入る()
+    {
+        $schedule = Schedule::command(SampleCommand::class, ['account' => 'a']);
+        TestScheduleCommand::$schedulesCallback = fn (): array => [$schedule];
+        $command = new class extends TestScheduleCommand {
+            protected function runProcess(string $commandLine, callable $onLine, callable $onStart): ?int
+            {
+                throw new \RuntimeException('想定外の結果');
+            }
+        };
+        $command->time = new DateTimeImmutable('2026-03-04 10:30:00');
+
+        $command->go($this->configures(), ['run' => $schedule->key()]);
+
+        $this->assertCount(1, $command->results);
+        $this->assertSame(ScheduleEvent::EXCEPTION, $command->results[0]->event);
+        $this->assertSame('想定外の結果', $command->results[0]->error);
+        $this->assertSame(SampleCommand::class, $command->results[0]->commandClass);
+        $this->assertSame(['account' => 'a'], $command->results[0]->arguments);
+        $this->assertLockReleased($schedule);
+    }
+
+    #[Test]
+    public function 見つからない指定の結果()
+    {
+        $command = $this->command();
+
+        $command->go($this->configures(), ['run' => 'nothing']);
+
+        $this->assertCount(1, $command->results);
+        $this->assertSame(ScheduleEvent::NOT_FOUND, $command->results[0]->event);
+        $this->assertSame('スケジュールの指定が見つかりません: nothing', $command->results[0]->error);
+        $this->assertNull($command->results[0]->commandClass);
+    }
+
+    #[Test]
+    public function 鍵のファイルが開けないときの結果()
+    {
+        $schedule = Schedule::command(SampleCommand::class, ['account' => 'a']);
+        TestScheduleCommand::$schedulesCallback = fn (): array => [$schedule];
+        $command = $this->command();
+
+        $command->go(['schedule' => ['lock_directory' => $this->directory . '/nothing']], ['run' => $schedule->key()]);
+
+        $this->assertCount(1, $command->results);
+        $result = $command->results[0];
+        $this->assertSame(ScheduleEvent::LOCK_FILE_FAILED, $result->event);
+        $this->assertSame(SampleCommand::class, $result->commandClass);
+        $this->assertSame(['account' => 'a'], $result->arguments);
+        $this->assertSame('鍵のファイルが開けません: ' . $this->directory . '/nothing/schedule-' . $schedule->key() . '.lock', $result->error);
+    }
+
+    #[Test]
+    public function 鍵が取れなかったので起動しなかったときは結果を渡さない()
+    {
+        $schedule = Schedule::command(SampleCommand::class);
+        TestScheduleCommand::$schedulesCallback = fn (): array => [$schedule];
+        $command = $this->command();
+        $lock = fopen($this->directory . '/lock/schedule-' . $schedule->key() . '.lock', 'c');
+        $this->assertTrue(flock($lock, LOCK_EX | LOCK_NB));
+
+        $command->go($this->configures(), ['run' => $schedule->key()]);
+
+        $this->assertSame([], $command->results);
+        flock($lock, LOCK_UN);
+        fclose($lock);
+    }
+
+    #[Test]
+    public function cronから起動した形で例外が無ければ結果を渡さない()
+    {
+        $schedule = Schedule::command(SampleCommand::class);
+        TestScheduleCommand::$schedulesCallback = fn (): array => [$schedule];
+        $command = $this->command();
+
+        $command->go($this->configures(), []);
+
+        $this->assertSame([], $command->results);
+    }
+
+    #[Test]
+    public function 結果は鍵を放したあとに渡る()
+    {
+        $schedule = Schedule::command(SampleCommand::class);
+        TestScheduleCommand::$schedulesCallback = fn (): array => [$schedule];
+        $command = new class extends TestScheduleCommand {
+            public string $lockPath = '';
+
+            public ?bool $acquiredInResult = null;
+
+            protected function onResult(\Citrus\Schedule\ScheduleResult $result): void
+            {
+                $other = fopen($this->lockPath, 'r');
+                $this->acquiredInResult = flock($other, LOCK_EX | LOCK_NB);
+                fclose($other);
+            }
+        };
+        $command->time = new DateTimeImmutable('2026-03-04 10:30:00');
+        $command->lockPath = $this->directory . '/lock/schedule-' . $schedule->key() . '.lock';
+
+        $command->go($this->configures(), ['run' => $schedule->key()]);
+
+        $this->assertTrue($command->acquiredInResult);
+    }
+
+    #[Test]
+    public function onResultで例外が起きてもログに書いて鍵を放す()
+    {
+        $this->loadLogger(Level::ERROR);
+        $schedule = Schedule::command(SampleCommand::class);
+        TestScheduleCommand::$schedulesCallback = fn (): array => [$schedule];
+        $command = $this->command();
+        $command->resultThrows = new \RuntimeException('受け取りの例外');
+
+        $command->go($this->configures(), ['run' => $schedule->key()]);
+
+        $this->assertCount(1, $command->results);
+        $this->assertStringContainsString('受け取りの例外', $this->logs());
+        $this->assertLockReleased($schedule);
+    }
+
+    #[Test]
+    public function onResultで例外が起きてもcronから起動した形は続く()
+    {
+        $this->loadLogger(Level::ERROR);
+        TestScheduleCommand::$schedulesCallback = function (): array {
+            throw new ScheduleException('もとの例外');
+        };
+        $command = $this->command();
+        $command->resultThrows = new \RuntimeException('受け取りの例外2');
+
+        $command->go($this->configures(), []);
+
+        $logs = $this->logs();
+        $this->assertStringContainsString('もとの例外', $logs);
+        $this->assertStringContainsString('受け取りの例外2', $logs);
+    }
+
+    #[Test]
+    public function at引数が無いか読めないときはnullになる()
+    {
+        $schedule = Schedule::command(SampleCommand::class);
+        TestScheduleCommand::$schedulesCallback = fn (): array => [$schedule];
+
+        foreach ([null, 'abc', '2026-03-04 10:30', '2026-13-45T10:30', '2026-03-04T10:30:15'] as $value)
+        {
+            $command = $this->command();
+            $parameters = ['run' => $schedule->key()];
+            if ($value !== null)
+            {
+                $parameters['at'] = $value;
+            }
+
+            $command->go($this->configures(), $parameters);
+
+            $this->assertCount(1, $command->results);
+            $this->assertNull($command->results[0]->at, (string)$value);
+        }
+    }
+
+    #[Test]
+    public function 引き継ぐ引数から_at_を除く()
+    {
+        $schedule = Schedule::command(SampleCommand::class);
+        TestScheduleCommand::$schedulesCallback = fn (): array => [$schedule];
+        $_SERVER['argv'] = [
+            'src/command.php', '--at=2020-01-01T00:00', '--domain=example.com', '--at', '2020-01-01T00:00', '--other=1',
+        ];
+        $command = $this->command();
+
+        $command->go($this->configures(), []);
+        $command->go($this->configures(), ['run' => $schedule->key()]);
+
+        $this->assertSame(
+            implode(' ', array_map('escapeshellarg', [
+                PHP_BINARY,
+                'src/command.php',
+                '--command=TestSchedule',
+                '--run=' . $schedule->key(),
+                '--at=2026-03-04T10:30',
+                '--domain=example.com',
+                '--other=1',
+            ])),
+            $command->spawned[0]
+        );
+        $this->assertSame(
+            implode(' ', array_map('escapeshellarg', [
+                PHP_BINARY,
+                'src/command.php',
+                '--command=Sample',
+                '--domain=example.com',
+                '--other=1',
+            ])),
+            $command->processed[0]
+        );
     }
 }
